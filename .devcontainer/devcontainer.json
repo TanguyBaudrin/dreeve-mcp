@@ -1,0 +1,22 @@
+{
+  "name": "dreeve-mcp",
+  "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "forwardPorts": [8080],
+  "portsAttributes": {
+    "8080": { "label": "MCP endpoint (/mcp)", "onAutoForward": "notify" }
+  },
+  "postCreateCommand": "cargo fetch",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "serayuzgur.crates"
+      ]
+    }
+  }
+}
