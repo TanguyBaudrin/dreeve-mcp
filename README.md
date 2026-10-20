@@ -32,6 +32,7 @@ The 15 tools map 1:1 onto the [Dreeve HTTP API v1](https://docs.dreeve.app/api/)
 |---|---|---|---|
 | `DREEVE_API_URL` | | `http://localhost:8080` | Base URL (`APP_URL`) of your Dreeve instance |
 | `MCP_BIND_ADDR` | | `0.0.0.0:8080` | Listen address of the MCP HTTP endpoint |
+| `MCP_ALLOWED_HOSTS` | | loopback only | Extra `Host` authorities accepted by the endpoint (`host` or `host:port`, comma-separated), e.g. `strava.baudrin.fr,10.0.5.190:8081`. `*` accepts any host. `localhost`, `127.0.0.1` and `::1` always stay |
 | `RUST_LOG` | | `info` | Log filter (`tracing-subscriber` `EnvFilter`) |
 | `SSL_CERT_FILE` | | `/etc/ssl/certs/ca-certificates.crt` | CA bundle used for TLS to Dreeve |
 

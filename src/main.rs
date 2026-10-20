@@ -49,7 +49,10 @@ async fn main() -> anyhow::Result<()> {
     let service = StreamableHttpService::new(
         move || Ok(DreeveServer::new(api.clone())),
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default().with_cancellation_token(shutdown.child_token()),
+        apply_allowed_hosts(
+            StreamableHttpServerConfig::default().with_cancellation_token(shutdown.child_token()),
+            env::var("MCP_ALLOWED_HOSTS").ok().as_deref(),
+        ),
     );
 
     let router = axum::Router::new()
@@ -82,6 +85,36 @@ async fn require_bearer(req: Request, next: Next) -> Response {
             .into_response();
     }
     next.run(req).await
+}
+
+/// Widens the `Host`-header allow-list (DNS-rebinding protection) with the
+/// comma-separated authorities in `MCP_ALLOWED_HOSTS` — `host` or `host:port`,
+/// e.g. `strava.baudrin.fr,10.0.5.190:8081`. The loopback defaults always
+/// stay; `*` (or an empty value) accepts any `Host`. When the variable is
+/// unset, only the loopback defaults apply.
+fn apply_allowed_hosts(
+    config: StreamableHttpServerConfig,
+    raw: Option<&str>,
+) -> StreamableHttpServerConfig {
+    let Some(raw) = raw else {
+        return config; // unset: keep rmcp's loopback-only default
+    };
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "*" {
+        return config.disable_allowed_hosts();
+    }
+    let mut hosts = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+    hosts.extend(
+        raw.split(',')
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(String::from),
+    );
+    config.with_allowed_hosts(hosts)
 }
 
 /// `true` when `headers` carries a non-empty `Bearer` token, whatever its
@@ -148,5 +181,30 @@ mod tests {
         assert!(!has_bearer(&headers_with("Basic Zm9vOmJhcg==")));
         assert!(!has_bearer(&headers_with("Bearer ")));
         assert!(!has_bearer(&headers_with("Bearer")));
+    }
+
+    #[test]
+    fn allowed_hosts_unset_keeps_loopback_defaults() {
+        let config = apply_allowed_hosts(StreamableHttpServerConfig::default(), None);
+        assert_eq!(config.allowed_hosts, vec!["localhost", "127.0.0.1", "::1"]);
+    }
+
+    #[test]
+    fn allowed_hosts_appends_to_the_loopback_defaults() {
+        let config = apply_allowed_hosts(
+            StreamableHttpServerConfig::default(),
+            Some("strava.baudrin.fr, 10.0.5.190:8081"),
+        );
+        for host in ["localhost", "::1", "strava.baudrin.fr", "10.0.5.190:8081"] {
+            assert!(config.allowed_hosts.iter().any(|h| h == host), "{host}");
+        }
+    }
+
+    #[test]
+    fn allowed_hosts_star_or_empty_accepts_any_host() {
+        for raw in ["*", "", "   "] {
+            let config = apply_allowed_hosts(StreamableHttpServerConfig::default(), Some(raw));
+            assert!(config.allowed_hosts.is_empty(), "{raw:?}");
+        }
     }
 }
