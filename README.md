@@ -32,7 +32,7 @@ The 15 tools map 1:1 onto the [Dreeve HTTP API v1](https://docs.dreeve.app/api/)
 |---|---|---|---|
 | `DREEVE_API_URL` | | `http://localhost:8080` | Base URL (`APP_URL`) of your Dreeve instance |
 | `MCP_BIND_ADDR` | | `0.0.0.0:8080` | Listen address of the MCP HTTP endpoint |
-| `MCP_ALLOWED_HOSTS` | | loopback only | Extra `Host` authorities accepted by the endpoint (`host` or `host:port`, comma-separated), e.g. `strava.baudrin.fr,10.0.5.190:8081`. `*` accepts any host. `localhost`, `127.0.0.1` and `::1` always stay |
+| `MCP_ALLOWED_HOSTS` | | loopback only | Extra `Host` authorities accepted by the endpoint (`host` or `host:port`, comma-separated), e.g. `dreeve.example.com,203.0.113.10:8081`. `*` accepts any host. `localhost`, `127.0.0.1` and `::1` always stay |
 | `RUST_LOG` | | `info` | Log filter (`tracing-subscriber` `EnvFilter`) |
 | `SSL_CERT_FILE` | | `/etc/ssl/certs/ca-certificates.crt` | CA bundle used for TLS to Dreeve |
 
@@ -66,6 +66,58 @@ binary: a few MB, no OS packages, non-root (`65532`).
 >   ghcr.io/tanguybaudrin/dreeve-mcp:latest
 > # → upload_activity_file(path = "/data/morning-ride.fit")
 > ```
+
+### In your Dreeve compose stack
+
+The typical deployment adds dreeve-mcp as an extra service next to Dreeve in
+the same `docker-compose.yaml`, on the compose-internal network — append:
+
+```yaml
+services:
+  # … your existing dreeve `app` (and `daemon`) services …
+
+  mcp:
+    image: ghcr.io/tanguybaudrin/dreeve-mcp:latest
+    restart: unless-stopped
+    ports:
+      - 8081:8080 # any free host port: <host>:8081/mcp
+    environment:
+      # Service name of the Dreeve container, as it resolves on the compose network
+      DREEVE_API_URL: http://app:8080
+      # How clients address this endpoint (the Host header is validated;
+      # unset = only localhost is accepted, * = accept anything)
+      MCP_ALLOWED_HOSTS: dreeve.example.com,203.0.113.10:8081
+    # Optional: only needed for upload_activity_file / add_activity_image,
+    # so tool paths match the directory Dreeve imports from. Mount the same
+    # files storage Dreeve uses, read-only.
+    volumes:
+      - ./storage/files:/data:ro
+```
+
+Then:
+
+```sh
+docker compose up -d mcp
+```
+
+A few things worth knowing:
+
+- **No API key goes into the compose file.** The container is keyless; every
+  MCP client authenticates per request with its own
+  `Authorization: Bearer drv_…` header (see [Any MCP client](#any-mcp-client)).
+  The header is forwarded verbatim to the Dreeve API, so different users can
+  use different keys through the same deployment.
+- `DREEVE_API_URL` must be reachable *from inside the mcp container* — in a
+  shared compose file that is the Dreeve service name
+  (`http://<service>:8080`), not the public URL.
+- Set `MCP_ALLOWED_HOSTS` to the `Host` values your MCP clients will send:
+  the public hostname and/or `<lan-ip>:<port>` of the endpoint, or `*` when
+  it is only reachable on a trusted network. Without it, every remote
+  request is refused with `403 Forbidden` (rmcp's DNS-rebinding guard).
+- If Dreeve is served behind a reverse proxy, you can point clients at
+  `https://your-domain/mcp` instead of a raw port by proxying that path to
+  the mcp container — add the public hostname to `MCP_ALLOWED_HOSTS` and
+  make sure the proxy forwards the `Authorization` header unchanged.
 
 ### Claude Code
 

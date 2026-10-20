@@ -89,7 +89,7 @@ async fn require_bearer(req: Request, next: Next) -> Response {
 
 /// Widens the `Host`-header allow-list (DNS-rebinding protection) with the
 /// comma-separated authorities in `MCP_ALLOWED_HOSTS` — `host` or `host:port`,
-/// e.g. `strava.baudrin.fr,10.0.5.190:8081`. The loopback defaults always
+/// e.g. `dreeve.example.com,203.0.113.10:8081`. The loopback defaults always
 /// stay; `*` (or an empty value) accepts any `Host`. When the variable is
 /// unset, only the loopback defaults apply.
 fn apply_allowed_hosts(
@@ -193,9 +193,14 @@ mod tests {
     fn allowed_hosts_appends_to_the_loopback_defaults() {
         let config = apply_allowed_hosts(
             StreamableHttpServerConfig::default(),
-            Some("strava.baudrin.fr, 10.0.5.190:8081"),
+            Some("dreeve.example.com, 203.0.113.10:8081"),
         );
-        for host in ["localhost", "::1", "strava.baudrin.fr", "10.0.5.190:8081"] {
+        for host in [
+            "localhost",
+            "::1",
+            "dreeve.example.com",
+            "203.0.113.10:8081",
+        ] {
             assert!(config.allowed_hosts.iter().any(|h| h == host), "{host}");
         }
     }
