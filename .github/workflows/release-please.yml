@@ -1,0 +1,46 @@
+name: Release Please
+
+# Opens (and keeps updating) a release PR whenever conventional commits
+# land on main. Merging that PR bumps Cargo.toml/Cargo.lock, updates
+# CHANGELOG.md, creates the tag vX.Y.Z and publishes a GitHub Release.
+#
+# The dispatch step below exists because releases/tags created with the
+# default GITHUB_TOKEN do NOT trigger other workflows (GitHub's
+# anti-recursion guard), so docker.yml's `push: tags` trigger would never
+# fire for an auto-created tag. `workflow_dispatch` is explicitly exempt
+# from that guard, and dispatching with --ref <tag> keeps GITHUB_REF on
+# the tag so docker.yml's semver tagging still works.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write # needed for the `gh workflow run` dispatch below
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Dispatch Docker publish for the new tag
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if gh workflow run docker.yml --repo "${{ github.repository }}" --ref "$TAG"; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Failed to dispatch docker.yml for $TAG" >&2
+          exit 1
