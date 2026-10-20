@@ -1,8 +1,11 @@
 //! Thin HTTP client for the Dreeve v1 API.
 //!
-//! Every endpoint is authenticated with a bearer token and returns JSON.
-//! Errors share a stable `{ "error": code, "message": text }` shape, which
-//! [`ApiError`] unwraps so the human readable message reaches the MCP caller.
+//! The client is keyless: every endpoint takes the `Authorization` header
+//! value taken from the incoming MCP request and forwards it verbatim, so the
+//! API key never lives in the server's environment or state. Responses are
+//! JSON; errors share a stable `{ "error": code, "message": text }` shape,
+//! which [`ApiError`] unwraps so the human readable message reaches the MCP
+//! caller.
 
 use std::{fmt, time::Duration};
 
@@ -28,11 +31,10 @@ impl std::error::Error for ApiError {}
 pub struct DreeveApi {
     http: Client,
     base_url: String,
-    api_key: String,
 }
 
 impl DreeveApi {
-    pub fn new(base_url: String, api_key: String) -> Self {
+    pub fn new(base_url: String) -> Self {
         let http = Client::builder()
             .timeout(Duration::from_secs(60))
             .user_agent(concat!("dreeve-mcp/", env!("CARGO_PKG_VERSION")))
@@ -41,25 +43,29 @@ impl DreeveApi {
         Self {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
-            api_key,
         }
     }
 
-    /// `GET /api/v1/status` — cheapest way to check URL and key.
-    pub async fn status(&self) -> Result<Value, ApiError> {
-        self.get("/api/v1/status", &[]).await
+    /// `GET /api/v1/status` — cheapest way to check the URL and the key.
+    pub async fn status(&self, auth: &str) -> Result<Value, ApiError> {
+        self.get("/api/v1/status", &[], auth).await
     }
 
-    pub async fn get(&self, path: &str, query: &[(&str, String)]) -> Result<Value, ApiError> {
+    pub async fn get(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        auth: &str,
+    ) -> Result<Value, ApiError> {
         let resp = self
-            .send(self.request(Method::GET, path).query(query))
+            .send(self.request(Method::GET, path, auth).query(query))
             .await?;
         Self::interpret(resp).await
     }
 
     /// GET an endpoint that answers with a non-JSON body (the GPX export).
-    pub async fn get_text(&self, path: &str) -> Result<String, ApiError> {
-        let resp = self.send(self.request(Method::GET, path)).await?;
+    pub async fn get_text(&self, path: &str, auth: &str) -> Result<String, ApiError> {
+        let resp = self.send(self.request(Method::GET, path, auth)).await?;
         let status = resp.status();
         if !status.is_success() {
             return Err(Self::error_from(status, resp.text().await.unwrap_or_default()).await);
@@ -69,10 +75,10 @@ impl DreeveApi {
             .map_err(|e| ApiError(format!("cannot read response body: {e}")))
     }
 
-    pub async fn patch(&self, path: &str, body: &Value) -> Result<Value, ApiError> {
+    pub async fn patch(&self, path: &str, body: &Value, auth: &str) -> Result<Value, ApiError> {
         let resp = self
             .send(
-                self.request(Method::PATCH, path)
+                self.request(Method::PATCH, path, auth)
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
                     .json(body),
             )
@@ -81,10 +87,10 @@ impl DreeveApi {
     }
 
     /// POST a JSON body.
-    pub async fn post_json(&self, path: &str, body: &Value) -> Result<Value, ApiError> {
+    pub async fn post_json(&self, path: &str, body: &Value, auth: &str) -> Result<Value, ApiError> {
         let resp = self
             .send(
-                self.request(Method::POST, path)
+                self.request(Method::POST, path, auth)
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
                     .json(body),
             )
@@ -93,13 +99,18 @@ impl DreeveApi {
     }
 
     /// DELETE an endpoint answering `204 No Content`.
-    pub async fn delete(&self, path: &str) -> Result<(), ApiError> {
-        let resp = self.send(self.request(Method::DELETE, path)).await?;
+    pub async fn delete(&self, path: &str, auth: &str) -> Result<(), ApiError> {
+        let resp = self.send(self.request(Method::DELETE, path, auth)).await?;
         Self::interpret(resp).await.map(|_| ())
     }
 
     /// POST `multipart/form-data` with a local file in the `file` part.
-    pub async fn post_file(&self, path: &str, file_path: &str) -> Result<Value, ApiError> {
+    pub async fn post_file(
+        &self,
+        path: &str,
+        file_path: &str,
+        auth: &str,
+    ) -> Result<Value, ApiError> {
         let bytes = tokio::fs::read(file_path).await.map_err(|e| {
             ApiError(format!(
                 "cannot read {file_path}: {e} — the file must be readable from where dreeve-mcp runs (e.g. a mounted volume)"
@@ -115,15 +126,16 @@ impl DreeveApi {
             reqwest::multipart::Part::bytes(bytes).file_name(file_name),
         );
         let resp = self
-            .send(self.request(Method::POST, path).multipart(form))
+            .send(self.request(Method::POST, path, auth).multipart(form))
             .await?;
         Self::interpret(resp).await
     }
 
-    fn request(&self, method: Method, path: &str) -> RequestBuilder {
+    fn request(&self, method: Method, path: &str, auth: &str) -> RequestBuilder {
         self.http
             .request(method, format!("{}{}", self.base_url, path))
-            .bearer_auth(&self.api_key)
+            // Forward the MCP client's `Authorization` header verbatim.
+            .header(reqwest::header::AUTHORIZATION, auth)
     }
 
     async fn send(&self, rb: RequestBuilder) -> Result<Response, ApiError> {
@@ -195,7 +207,17 @@ mod tests {
 
     #[test]
     fn base_url_trailing_slash_is_stripped() {
-        let api = DreeveApi::new("https://dreeve.example.com/".into(), "k".into());
+        let api = DreeveApi::new("https://dreeve.example.com/".into());
         assert_eq!(api.base_url, "https://dreeve.example.com");
+    }
+
+    #[test]
+    fn client_carries_no_api_key() {
+        let api = DreeveApi::new("http://localhost:8080".into());
+        assert_eq!(api.base_url, "http://localhost:8080");
+        // The key only ever travels as a per-request parameter; nothing is
+        // stored on the client, so a clone cannot leak a previous caller's key.
+        let clone = api.clone();
+        assert_eq!(clone.base_url, api.base_url);
     }
 }

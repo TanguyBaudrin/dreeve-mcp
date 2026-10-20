@@ -1,8 +1,9 @@
 //! The MCP server: every tool maps 1:1 onto a Dreeve HTTP API operation.
 
+use http::request::Parts;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
-    handler::server::wrapper::Parameters,
+    handler::server::{tool::Extension, wrapper::Parameters},
     model::{CallToolResult, ContentBlock},
     schemars, tool, tool_handler, tool_router,
 };
@@ -20,6 +21,25 @@ pub struct DreeveServer {
 impl DreeveServer {
     pub fn new(api: DreeveApi) -> Self {
         Self { api }
+    }
+
+    /// The `Authorization` header of the MCP request calling the tool,
+    /// forwarded verbatim to the Dreeve API. The HTTP layer already answers
+    /// `401` to key-less `POST`s; this is the tool-level safety net.
+    fn authorization(parts: &Parts) -> Result<&str, McpError> {
+        parts
+            .headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    "Missing Authorization header: the MCP client must send the \
+                     Dreeve API key as `Authorization: Bearer drv_…`.",
+                    None,
+                )
+            })
     }
 }
 
@@ -261,8 +281,12 @@ impl DreeveServer {
     #[tool(
         description = "Check the connection to the Dreeve instance. Returns the app name, the running version and whether this instance accepts file uploads (false when IMPORT_MODE is not `files`)."
     )]
-    async fn check_status(&self) -> Result<CallToolResult, McpError> {
-        match self.api.status().await {
+    async fn check_status(
+        &self,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, McpError> {
+        let auth = Self::authorization(&parts)?;
+        match self.api.status(auth).await {
             Ok(v) => ok_json(&v),
             Err(e) => fail(e),
         }
@@ -274,10 +298,12 @@ impl DreeveServer {
     async fn list_activities(
         &self,
         Parameters(params): Parameters<ListActivitiesParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        let auth = Self::authorization(&parts)?;
         match self
             .api
-            .get("/api/v1/activities", &list_activities_query(&params))
+            .get("/api/v1/activities", &list_activities_query(&params), auth)
             .await
         {
             Ok(v) => ok_json(&v),
@@ -291,10 +317,16 @@ impl DreeveServer {
     async fn get_activity(
         &self,
         Parameters(params): Parameters<ActivityIdParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        let auth = Self::authorization(&parts)?;
         match self
             .api
-            .get(&format!("/api/v1/activities/{}", params.activity_id), &[])
+            .get(
+                &format!("/api/v1/activities/{}", params.activity_id),
+                &[],
+                auth,
+            )
             .await
         {
             Ok(v) => ok_json(&v),
@@ -308,14 +340,20 @@ impl DreeveServer {
     async fn update_activity(
         &self,
         Parameters(params): Parameters<UpdateActivityParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        let auth = Self::authorization(&parts)?;
         let body = match update_activity_body(&params) {
             Ok(b) => b,
             Err(e) => return fail(e),
         };
         match self
             .api
-            .patch(&format!("/api/v1/activities/{}", params.activity_id), &body)
+            .patch(
+                &format!("/api/v1/activities/{}", params.activity_id),
+                &body,
+                auth,
+            )
             .await
         {
             Ok(v) => ok_json(&v),
@@ -329,10 +367,12 @@ impl DreeveServer {
     async fn delete_activity(
         &self,
         Parameters(params): Parameters<ActivityIdParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        let auth = Self::authorization(&parts)?;
         match self
             .api
-            .delete(&format!("/api/v1/activities/{}", params.activity_id))
+            .delete(&format!("/api/v1/activities/{}", params.activity_id), auth)
             .await
         {
             Ok(()) => ok_text("Activity deleted."),
@@ -346,10 +386,15 @@ impl DreeveServer {
     async fn download_activity_gpx(
         &self,
         Parameters(params): Parameters<ActivityIdParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        let auth = Self::authorization(&parts)?;
         match self
             .api
-            .get_text(&format!("/api/v1/activities/{}/gpx", params.activity_id))
+            .get_text(
+                &format!("/api/v1/activities/{}/gpx", params.activity_id),
+                auth,
+            )
             .await
         {
             Ok(gpx) => ok_text(&gpx),
@@ -363,12 +408,15 @@ impl DreeveServer {
     async fn add_activity_image(
         &self,
         Parameters(params): Parameters<AddActivityImageParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        let auth = Self::authorization(&parts)?;
         match self
             .api
             .post_file(
                 &format!("/api/v1/activities/{}/images", params.activity_id),
                 &params.path,
+                auth,
             )
             .await
         {
@@ -383,13 +431,18 @@ impl DreeveServer {
     async fn remove_activity_image(
         &self,
         Parameters(params): Parameters<ActivityImageIdParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        let auth = Self::authorization(&parts)?;
         match self
             .api
-            .delete(&format!(
-                "/api/v1/activities/{}/images/{}",
-                params.activity_id, params.image_id
-            ))
+            .delete(
+                &format!(
+                    "/api/v1/activities/{}/images/{}",
+                    params.activity_id, params.image_id
+                ),
+                auth,
+            )
             .await
         {
             Ok(()) => ok_text("Image removed."),
@@ -403,10 +456,12 @@ impl DreeveServer {
     async fn upload_activity_file(
         &self,
         Parameters(params): Parameters<UploadActivityFileParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        let auth = Self::authorization(&parts)?;
         match self
             .api
-            .post_file("/api/v1/activity/upload", &params.path)
+            .post_file("/api/v1/activity/upload", &params.path, auth)
             .await
         {
             Ok(v) => ok_json(&v),
@@ -420,10 +475,16 @@ impl DreeveServer {
     async fn list_file_imports(
         &self,
         Parameters(params): Parameters<ListFileImportsParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        let auth = Self::authorization(&parts)?;
         match self
             .api
-            .get("/api/v1/file-imports", &list_file_imports_query(&params))
+            .get(
+                "/api/v1/file-imports",
+                &list_file_imports_query(&params),
+                auth,
+            )
             .await
         {
             Ok(v) => ok_json(&v),
@@ -434,8 +495,12 @@ impl DreeveServer {
     #[tool(
         description = "List all gear, active gear first: id, name, type (imported/custom), retired flag, total distance and number of activities."
     )]
-    async fn list_gear(&self) -> Result<CallToolResult, McpError> {
-        match self.api.get("/api/v1/gear", &[]).await {
+    async fn list_gear(
+        &self,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, McpError> {
+        let auth = Self::authorization(&parts)?;
+        match self.api.get("/api/v1/gear", &[], auth).await {
             Ok(v) => ok_json(&v),
             Err(e) => fail(e),
         }
@@ -447,12 +512,15 @@ impl DreeveServer {
     async fn list_maintenance_tasks(
         &self,
         Parameters(params): Parameters<ListMaintenanceTasksParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        let auth = Self::authorization(&parts)?;
         match self
             .api
             .get(
                 "/api/v1/gear/maintenance-tasks",
                 &list_maintenance_tasks_query(&params),
+                auth,
             )
             .await
         {
@@ -464,8 +532,12 @@ impl DreeveServer {
     #[tool(
         description = "List weight measurements, newest to oldest, in the instance's configured unit system (kilograms for Metric, pounds for Imperial)."
     )]
-    async fn list_weights(&self) -> Result<CallToolResult, McpError> {
-        match self.api.get("/api/v1/athlete/weights", &[]).await {
+    async fn list_weights(
+        &self,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<CallToolResult, McpError> {
+        let auth = Self::authorization(&parts)?;
+        match self.api.get("/api/v1/athlete/weights", &[], auth).await {
             Ok(v) => ok_json(&v),
             Err(e) => fail(e),
         }
@@ -477,12 +549,18 @@ impl DreeveServer {
     async fn record_weight(
         &self,
         Parameters(params): Parameters<RecordWeightParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        let auth = Self::authorization(&parts)?;
         if params.weight <= 0.0 {
             return fail(r#""weight" must be greater than 0."#);
         }
         let body = json!({ "weight": params.weight, "on": params.on });
-        match self.api.post_json("/api/v1/athlete/weights", &body).await {
+        match self
+            .api
+            .post_json("/api/v1/athlete/weights", &body, auth)
+            .await
+        {
             Ok(v) => ok_json(&v),
             Err(e) => fail(e),
         }
@@ -494,10 +572,12 @@ impl DreeveServer {
     async fn delete_weight(
         &self,
         Parameters(params): Parameters<DeleteWeightParams>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<CallToolResult, McpError> {
+        let auth = Self::authorization(&parts)?;
         match self
             .api
-            .delete(&format!("/api/v1/athlete/weights/{}", params.on))
+            .delete(&format!("/api/v1/athlete/weights/{}", params.on), auth)
             .await
         {
             Ok(()) => ok_text("Weight measurement deleted."),
@@ -508,13 +588,43 @@ impl DreeveServer {
 
 #[tool_handler(
     name = "dreeve-mcp",
-    instructions = "Tools talk to a self-hosted Dreeve instance; the base URL and API key are configured in the server's environment (DREEVE_API_URL, DREEVE_API_KEY). Ids are prefixed: activities look like `activity-9756441741`, gear like `gear-b12659861`, images like `activityImage-…` — use ids returned by the list/get tools verbatim. Dates are `YYYY-MM-DD`, weights follow the instance's unit system (Metric = kg, Imperial = lb), and sport types use Strava's vocabulary (Ride, GravelRide, Run, TrailRun, Hike…). Uploads (upload_activity_file, add_activity_image) read a file path from the machine running dreeve-mcp, not inline data, and their imports are asynchronous: poll list_file_imports for the outcome. Update and delete operations require the instance to run with IMPORT_MODE=files."
+    instructions = "Tools talk to a self-hosted Dreeve instance; the base URL is configured in the server's environment (DREEVE_API_URL) and the API key is sent per request by the MCP client in the `Authorization: Bearer …` header (from Dreeve → Settings → Security → API access). Ids are prefixed: activities look like `activity-9756441741`, gear like `gear-b12659861`, images like `activityImage-…` — use ids returned by the list/get tools verbatim. Dates are `YYYY-MM-DD`, weights follow the instance's unit system (Metric = kg, Imperial = lb), and sport types use Strava's vocabulary (Ride, GravelRide, Run, TrailRun, Hike…). Uploads (upload_activity_file, add_activity_image) read a file path from the machine running dreeve-mcp, not inline data, and their imports are asynchronous: poll list_file_imports for the outcome. Update and delete operations require the instance to run with IMPORT_MODE=files."
 )]
 impl ServerHandler for DreeveServer {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parts_with_auth(value: Option<&str>) -> Parts {
+        let mut builder = http::Request::builder().uri("/mcp");
+        if let Some(value) = value {
+            builder = builder.header(http::header::AUTHORIZATION, value);
+        }
+        builder.body(()).expect("request").into_parts().0
+    }
+
+    #[test]
+    fn authorization_reads_the_bearer_header_verbatim() {
+        let parts = parts_with_auth(Some("Bearer drv_abc123"));
+        assert_eq!(
+            DreeveServer::authorization(&parts).unwrap(),
+            "Bearer drv_abc123"
+        );
+    }
+
+    #[test]
+    fn authorization_rejects_a_missing_header() {
+        let parts = parts_with_auth(None);
+        let err = DreeveServer::authorization(&parts).unwrap_err();
+        assert!(err.message.contains("Authorization"), "{}", err.message);
+    }
+
+    #[test]
+    fn authorization_rejects_an_empty_header() {
+        let parts = parts_with_auth(Some("   "));
+        assert!(DreeveServer::authorization(&parts).is_err());
+    }
 
     fn update_params() -> UpdateActivityParams {
         UpdateActivityParams {

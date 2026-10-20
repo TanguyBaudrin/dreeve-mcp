@@ -30,11 +30,16 @@ The 15 tools map 1:1 onto the [Dreeve HTTP API v1](https://docs.dreeve.app/api/)
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `DREEVE_API_KEY` | ✅ | — | Bearer key from Dreeve → *Settings → Security → API access* (`drv_…`) |
 | `DREEVE_API_URL` | | `http://localhost:8080` | Base URL (`APP_URL`) of your Dreeve instance |
 | `MCP_BIND_ADDR` | | `0.0.0.0:8080` | Listen address of the MCP HTTP endpoint |
 | `RUST_LOG` | | `info` | Log filter (`tracing-subscriber` `EnvFilter`) |
 | `SSL_CERT_FILE` | | `/etc/ssl/certs/ca-certificates.crt` | CA bundle used for TLS to Dreeve |
+
+The server holds **no API key**: each MCP client sends its own key on every
+request as an `Authorization: Bearer drv_…` header, which is forwarded
+verbatim to the Dreeve API. Generate a key in Dreeve under
+*Settings → Security → API access*. Requests to `POST /mcp` without a
+`Bearer` token are rejected with `401 Unauthorized`.
 
 ## Running
 
@@ -42,7 +47,6 @@ The 15 tools map 1:1 onto the [Dreeve HTTP API v1](https://docs.dreeve.app/api/)
 
 ```sh
 docker run --rm -p 8080:8080 \
-  -e DREEVE_API_KEY=drv_xxx \
   -e DREEVE_API_URL=https://dreeve.example.com \
   ghcr.io/tanguybaudrin/dreeve-mcp:latest
 ```
@@ -57,7 +61,6 @@ binary: a few MB, no OS packages, non-root (`65532`).
 > `.fit`/`.tcx`/`.gpx` files and pass the path as seen inside the container:
 > ```sh
 > docker run --rm -p 8080:8080 \
->   -e DREEVE_API_KEY=drv_xxx \
 >   -v "$HOME/activities:/data:ro" \
 >   ghcr.io/tanguybaudrin/dreeve-mcp:latest
 > # → upload_activity_file(path = "/data/morning-ride.fit")
@@ -66,17 +69,24 @@ binary: a few MB, no OS packages, non-root (`65532`).
 ### Claude Code
 
 ```sh
-claude mcp add --transport http dreeve http://localhost:8080/mcp
+claude mcp add --transport http \
+  --header "Authorization: Bearer drv_xxx" \
+  dreeve http://localhost:8080/mcp
 ```
 
 ### Any MCP client
+
+Send your Dreeve API key as an `Authorization` header on every request:
 
 ```json
 {
   "mcpServers": {
     "dreeve": {
       "type": "streamable-http",
-      "url": "http://localhost:8080/mcp"
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer drv_xxx"
+      }
     }
   }
 }
@@ -85,7 +95,6 @@ claude mcp add --transport http dreeve http://localhost:8080/mcp
 ### From source
 
 ```sh
-export DREEVE_API_KEY=drv_xxx
 export DREEVE_API_URL=http://localhost:8080
 cargo run --release
 ```
@@ -108,7 +117,7 @@ Multi-stage: `rust:1-alpine` (static musl build) → `scratch`.
 
 ```sh
 docker build -t dreeve-mcp .
-docker run --rm -e DREEVE_API_KEY=drv_xxx -p 8080:8080 dreeve-mcp
+docker run --rm -p 8080:8080 dreeve-mcp
 ```
 
 ## Continuous integration

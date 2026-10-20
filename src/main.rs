@@ -7,7 +7,13 @@ mod server;
 
 use std::env;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
+use axum::{
+    extract::Request,
+    http::{HeaderMap, StatusCode, header},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
@@ -32,31 +38,12 @@ async fn main() -> anyhow::Result<()> {
         .trim_end_matches('/')
         .to_string();
 
-    let api_key = match env::var("DREEVE_API_KEY") {
-        Ok(key) if !key.trim().is_empty() => key,
-        _ => bail!(
-            "DREEVE_API_KEY is not set.\n\
-             Generate a key in Dreeve under Settings → Security → API access \
-             and pass it as the DREEVE_API_KEY environment variable."
-        ),
-    };
-
     let bind_addr = env::var("MCP_BIND_ADDR").unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_string());
 
-    let api = DreeveApi::new(base_url.clone(), api_key);
-
-    // One cheap startup probe so a wrong URL or key is visible in the logs.
-    // Non-fatal: the instance may just not be up yet.
-    match api.status().await {
-        Ok(status) => tracing::info!(
-            "connected to Dreeve {} (uploads enabled: {})",
-            status["version"].as_str().unwrap_or("unknown"),
-            status["canUpload"].as_bool().unwrap_or(false),
-        ),
-        Err(e) => tracing::warn!(
-            "cannot reach Dreeve at {base_url} yet: {e} (tools will retry on each call)"
-        ),
-    }
+    // No API key lives in this process: every MCP client sends its own key in
+    // the `Authorization: Bearer …` header of its requests, and it is
+    // forwarded verbatim to the Dreeve API on each tool call.
+    let api = DreeveApi::new(base_url);
 
     let shutdown = CancellationToken::new();
     let service = StreamableHttpService::new(
@@ -65,7 +52,9 @@ async fn main() -> anyhow::Result<()> {
         StreamableHttpServerConfig::default().with_cancellation_token(shutdown.child_token()),
     );
 
-    let router = axum::Router::new().nest_service(MCP_PATH, service);
+    let router = axum::Router::new()
+        .nest_service(MCP_PATH, service)
+        .layer(axum::middleware::from_fn(require_bearer));
     let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await
         .with_context(|| format!("cannot bind to {bind_addr}"))?;
@@ -75,6 +64,38 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal(shutdown))
         .await?;
     Ok(())
+}
+
+/// Rejects `POST`s without a usable `Authorization: Bearer …` header with
+/// `401 Unauthorized` before the request reaches the MCP service, so an
+/// unauthorized client cannot even open a session. `GET` (SSE) and `DELETE`
+/// are left alone: no tool can be invoked without a `POST` anyway, and some
+/// clients only attach headers to `POST`s.
+async fn require_bearer(req: Request, next: Next) -> Response {
+    if req.method() == axum::http::Method::POST && !has_bearer(req.headers()) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer")],
+            "Missing or invalid Authorization header. Send the Dreeve API key as \
+             `Authorization: Bearer drv_…` on every request to the MCP endpoint.",
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
+/// `true` when `headers` carries a non-empty `Bearer` token, whatever its
+/// case (`bearer`, `BEARER`, …).
+fn has_bearer(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            let v = v.trim();
+            v.split_once(' ').is_some_and(|(scheme, token)| {
+                scheme.eq_ignore_ascii_case("bearer") && !token.trim().is_empty()
+            })
+        })
 }
 
 /// Resolves on Ctrl-C or SIGTERM (what `docker stop` sends), then cancels the
@@ -101,4 +122,31 @@ async fn shutdown_signal(token: CancellationToken) {
     }
     tracing::info!("shutting down");
     token.cancel();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers_with(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, value.parse().expect("header value"));
+        headers
+    }
+
+    #[test]
+    fn has_bearer_accepts_a_non_empty_bearer_token() {
+        assert!(has_bearer(&headers_with("Bearer drv_abc123")));
+        assert!(has_bearer(&headers_with("bearer drv_abc123")));
+        assert!(has_bearer(&headers_with("BEARER   drv_abc123  ")));
+    }
+
+    #[test]
+    fn has_bearer_rejects_missing_or_malformed_values() {
+        assert!(!has_bearer(&HeaderMap::new()));
+        assert!(!has_bearer(&headers_with("drv_abc123")));
+        assert!(!has_bearer(&headers_with("Basic Zm9vOmJhcg==")));
+        assert!(!has_bearer(&headers_with("Bearer ")));
+        assert!(!has_bearer(&headers_with("Bearer")));
+    }
 }
